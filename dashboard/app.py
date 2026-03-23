@@ -1,9 +1,10 @@
 import os
 import sys
+from datetime import datetime
 
 import pandas as pd
+import requests
 import streamlit as st
-from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -15,6 +16,9 @@ DATABASE_URL = f"sqlite:///{DB_PATH}"
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
+OPENFDA_URL = "https://api.fda.gov/transparency/crl.json"
+DATE_FROM = "01/01/2021"
+
 st.set_page_config(
     page_title="FDA CRL Tracker",
     page_icon=LOGO_PATH if os.path.exists(LOGO_PATH) else "💊",
@@ -22,13 +26,110 @@ st.set_page_config(
 )
 
 
-@st.cache_data
-def load_data():
+def _derive_application_type(application_number) -> str:
+    if not application_number:
+        return "Unknown"
+    if isinstance(application_number, list):
+        application_number = " ".join(application_number)
+    upper = application_number.upper()
+    if "BLA" in upper:
+        return "BLA"
+    elif "NDA" in upper:
+        return "NDA"
+    return "Unknown"
+
+
+def _derive_outcome(letter_type: str) -> str:
+    if not letter_type:
+        return "Other"
+    mapping = {
+        "APPROVAL": "Approved",
+        "TENTATIVE APPROVAL": "Tentative Approval",
+        "COMPLETE RESPONSE": "Not Approved",
+        "RESCIND COMPLETE RESPONSE": "Rescinded",
+    }
+    return mapping.get(str(letter_type).strip().upper(), "Other")
+
+
+def _load_from_sqlite() -> pd.DataFrame:
     engine = create_engine(DATABASE_URL, echo=False)
     with engine.connect() as conn:
-        df = pd.read_sql("SELECT * FROM crl_records", conn)
+        return pd.read_sql("SELECT * FROM crl_records", conn)
 
-    # Parse letter_date to datetime for filtering/sorting
+
+def _load_from_api() -> pd.DataFrame:
+    api_key = os.environ.get("OPENFDA_API_KEY")
+    date_to = datetime.today().strftime("%m/%d/%Y")
+    limit = 100
+    records = []
+
+    # Get total count
+    params = {
+        "search": f'letter_date:["{DATE_FROM}" TO "{date_to}"]',
+        "limit": 1,
+        "skip": 0,
+    }
+    if api_key:
+        params["api_key"] = api_key
+
+    resp = requests.get(OPENFDA_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    total = resp.json().get("meta", {}).get("results", {}).get("total", 0)
+
+    status = st.status(f"Fetching {total} records from openFDA...", expanded=False)
+
+    for skip in range(0, total, limit):
+        params = {
+            "search": f'letter_date:["{DATE_FROM}" TO "{date_to}"]',
+            "limit": limit,
+            "skip": skip,
+        }
+        if api_key:
+            params["api_key"] = api_key
+
+        resp = requests.get(OPENFDA_URL, params=params, timeout=30)
+        resp.raise_for_status()
+
+        for item in resp.json().get("results", []):
+            application_number = item.get("application_number", "") or ""
+            if isinstance(application_number, list):
+                application_number = " ".join(application_number)
+            letter_type = item.get("letter_type", "") or ""
+
+            approver_center = item.get("approver_center") or []
+            if isinstance(approver_center, list):
+                approver_center = " | ".join(approver_center)
+
+            records.append({
+                "file_name":          item.get("file_name"),
+                "application_number": application_number,
+                "letter_type":        letter_type,
+                "letter_date":        item.get("letter_date"),
+                "company_name":       item.get("company_name"),
+                "company_rep":        item.get("company_rep"),
+                "company_address":    item.get("company_address"),
+                "approval_name":      item.get("approver_name"),
+                "approval_title":     item.get("approver_title"),
+                "approval_center":    approver_center,
+                "full_text":          item.get("full_text"),
+                "application_type":   _derive_application_type(application_number),
+                "outcome":            _derive_outcome(letter_type),
+                "date_fetched":       datetime.utcnow().isoformat(),
+            })
+
+        status.update(label=f"Fetched {min(skip + limit, total)} / {total} records...")
+
+    status.update(label=f"Loaded {len(records)} records from openFDA.", state="complete")
+    return pd.DataFrame(records)
+
+
+@st.cache_data(ttl=3600)
+def load_data() -> pd.DataFrame:
+    if os.path.exists(DB_PATH):
+        df = _load_from_sqlite()
+    else:
+        df = _load_from_api()
+
     df["letter_date_dt"] = pd.to_datetime(df["letter_date"], format="%m/%d/%Y", errors="coerce")
     df["year"] = df["letter_date_dt"].dt.year
 
