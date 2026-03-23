@@ -97,6 +97,10 @@ def fetch_all():
                     approver_center = item.get("approver_center") or []
                     if isinstance(approver_center, list):
                         approver_center = " | ".join(approver_center)
+                    approver_center = approver_center.replace(
+                        "Center tor Drug Evaluation and Research",
+                        "Center for Drug Evaluation and Research",
+                    )
 
                     application_number = item.get("application_number", "") or ""
                     if isinstance(application_number, list):

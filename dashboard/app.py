@@ -129,6 +129,10 @@ def _load_from_api() -> pd.DataFrame:
             approver_center = item.get("approver_center") or []
             if isinstance(approver_center, list):
                 approver_center = " | ".join(approver_center)
+            approver_center = approver_center.replace(
+                "Center tor Drug Evaluation and Research",
+                "Center for Drug Evaluation and Research",
+            )
 
             records.append({
                 "file_name":          item.get("file_name"),
