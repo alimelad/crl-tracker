@@ -280,6 +280,29 @@ TABLE_COLS = [
 
 df_display = df[TABLE_COLS].sort_values("letter_date", ascending=False).reset_index(drop=True)
 
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+_filename_parts = ["crl"]
+if selected_app_type != "All":
+    _filename_parts.append(selected_app_type)
+if selected_outcome != "All":
+    _filename_parts.append(selected_outcome.replace(" ", ""))
+if date_from.year == date_to.year:
+    _filename_parts.append(str(date_from.year))
+else:
+    _filename_parts.append(f"{date_from.year}-{date_to.year}")
+if company_search:
+    _filename_parts.append(company_search.replace(" ", "_"))
+_csv_filename = "_".join(_filename_parts) + ".csv"
+
+st.download_button(
+    label="Download Current View as CSV",
+    data=df_display.to_csv(index=False).encode("utf-8"),
+    file_name=_csv_filename,
+    mime="text/csv",
+)
+
 selection = st.dataframe(
     df_display,
     use_container_width=True,
