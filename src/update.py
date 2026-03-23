@@ -14,7 +14,7 @@ sys.path.insert(0, BASE_DIR)
 from src.models import CRLRecord, init_db
 from src.fetch import derive_application_type, derive_outcome
 
-API_KEY = os.getenv("OPENFDA_API_KEY")
+API_KEY = os.environ.get("OPENFDA_API_KEY")
 BASE_URL = "https://api.fda.gov/transparency/crl.json"
 LIMIT = 100
 

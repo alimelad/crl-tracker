@@ -14,7 +14,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 sys.path.insert(0, BASE_DIR)
 from src.models import CRLRecord, init_db
 
-API_KEY = os.getenv("OPENFDA_API_KEY")
+API_KEY = os.environ.get("OPENFDA_API_KEY")
 BASE_URL = "https://api.fda.gov/transparency/crl.json"
 LIMIT = 100
 DATE_FROM = "01/01/2021"
