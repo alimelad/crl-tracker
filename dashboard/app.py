@@ -179,6 +179,10 @@ all_centers = sorted(
 )
 selected_centers = st.sidebar.multiselect("Approval Center", all_centers)
 
+# Eventually approved
+eventually_approved_options = ["All", "Yes", "No"]
+selected_eventually_approved = st.sidebar.selectbox("Eventually Approved", eventually_approved_options)
+
 # Company name text search
 company_search = st.sidebar.text_input("Search company name")
 
@@ -208,17 +212,21 @@ if selected_centers:
         )
     ]
 
+if selected_eventually_approved != "All":
+    df = df[df["eventually_approved"] == selected_eventually_approved]
+
 if company_search:
     df = df[df["company_name"].str.contains(company_search, case=False, na=False)]
 
 # ---------------------------------------------------------------------------
 # Metric cards
 # ---------------------------------------------------------------------------
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Total Records", len(df))
 col2.metric("Not Approved", len(df[df["outcome"] == "Not Approved"]))
 col3.metric("Approved", len(df[df["outcome"] == "Approved"]))
 col4.metric("Tentative Approval", len(df[df["outcome"] == "Tentative Approval"]))
+col5.metric("Eventually Approved", len(df[df["eventually_approved"] == "Yes"]))
 
 st.divider()
 
@@ -227,6 +235,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 chart_col1, chart_col2 = st.columns(2)
 chart_col3, chart_col4 = st.columns(2)
+chart_col5, chart_col6 = st.columns(2)
 
 with chart_col1:
     st.subheader("Records by Year")
@@ -261,6 +270,21 @@ with chart_col4:
     center_counts.columns = ["Center", "Count"]
     st.bar_chart(center_counts.set_index("Center")["Count"])
 
+with chart_col5:
+    st.subheader("Eventually Approved by Year")
+    if "eventually_approved" in df.columns and df["eventually_approved"].notna().any():
+        ea_by_year = (
+            df[df["eventually_approved"].isin(["Yes", "No"])]
+            .groupby(["year", "eventually_approved"])
+            .size()
+            .reset_index(name="Count")
+        )
+        ea_pivot = ea_by_year.pivot(index="year", columns="eventually_approved", values="Count").fillna(0)
+        ea_pivot.index = ea_pivot.index.astype(str)
+        st.bar_chart(ea_pivot)
+    else:
+        st.caption("No eventually_approved data yet. Run src/crossref.py to populate.")
+
 st.divider()
 
 # ---------------------------------------------------------------------------
@@ -268,7 +292,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 st.subheader("Records")
 
-TABLE_COLS = [
+_base_cols = [
     "letter_date",
     "company_name",
     "application_number",
@@ -276,7 +300,10 @@ TABLE_COLS = [
     "letter_type",
     "outcome",
     "approval_center",
+    "eventually_approved",
+    "approval_date",
 ]
+TABLE_COLS = [c for c in _base_cols if c in df.columns]
 
 df_display = df[TABLE_COLS].sort_values("letter_date", ascending=False).reset_index(drop=True)
 
@@ -333,6 +360,24 @@ if selected_rows:
             f"Full Letter Text — {record['company_name']} ({record['letter_date']})",
             expanded=True,
         ):
+            # Approval cross-reference banner
+            eventually_approved = record.get("eventually_approved") if "eventually_approved" in record.index else None
+            approval_date = record.get("approval_date") if "approval_date" in record.index else None
+            if eventually_approved == "Yes":
+                st.markdown(
+                    f'<div style="background-color:#d4edda; border-left:4px solid #28a745; padding:0.6rem 1rem; border-radius:4px; color:#155724; margin-bottom:0.75rem;">'
+                    f'✅ <strong>This application was eventually approved on {approval_date}.</strong>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            elif eventually_approved == "No":
+                st.markdown(
+                    '<div style="background-color:#f0f0f0; border-left:4px solid #aaaaaa; padding:0.6rem 1rem; border-radius:4px; color:#555555; margin-bottom:0.75rem;">'
+                    'No approval found for this application.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
             st.markdown(f"**File:** {record['file_name']}")
             st.markdown(f"**Letter Type:** {record['letter_type']}  |  **Outcome:** {record['outcome']}")
             st.markdown(f"**Application:** {record['application_number']}  |  **Type:** {record['application_type']}")
