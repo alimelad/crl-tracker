@@ -1,8 +1,10 @@
 import os
 import sys
+import time
 from datetime import datetime
 
 import pandas as pd
+import plotly.express as px
 import requests
 import streamlit as st
 from sqlalchemy import create_engine
@@ -17,6 +19,7 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 
 OPENFDA_URL = "https://api.fda.gov/transparency/crl.json"
+DRUGSFDA_URL = "https://api.fda.gov/drug/drugsfda.json"
 DATE_FROM = "01/01/2021"
 
 st.set_page_config(
@@ -57,6 +60,33 @@ def _load_from_sqlite() -> pd.DataFrame:
         return pd.read_sql("SELECT * FROM crl_records", conn)
 
 
+def _crossref_approval(app_number: str, api_key: str | None) -> tuple[str, str | None]:
+    """Query drugsfda for a normalized application number and return (eventually_approved, approval_date)."""
+    params = {"search": f'application_number:"{app_number}"', "limit": 1}
+    if api_key:
+        params["api_key"] = api_key
+    try:
+        resp = requests.get(DRUGSFDA_URL, params=params, timeout=30)
+        if resp.status_code == 404:
+            return "No", None
+        resp.raise_for_status()
+        for result in resp.json().get("results", []):
+            for sub in result.get("submissions", []):
+                if (
+                    sub.get("submission_type", "").upper() == "ORIG"
+                    and sub.get("submission_status", "").upper() == "AP"
+                ):
+                    raw = sub.get("submission_status_date", "")
+                    try:
+                        approval_date = datetime.strptime(raw, "%Y%m%d").strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        approval_date = raw or None
+                    return "Yes", approval_date
+    except requests.RequestException:
+        pass
+    return "No", None
+
+
 def _load_from_api() -> pd.DataFrame:
     api_key = os.environ.get("OPENFDA_API_KEY")
     date_to = datetime.today().strftime("%m/%d/%Y")
@@ -76,7 +106,7 @@ def _load_from_api() -> pd.DataFrame:
     resp.raise_for_status()
     total = resp.json().get("meta", {}).get("results", {}).get("total", 0)
 
-    status = st.status(f"Fetching {total} records from openFDA...", expanded=False)
+    status = st.status(f"Fetching {total} CRL records from openFDA...", expanded=False)
 
     for skip in range(0, total, limit):
         params = {
@@ -115,11 +145,37 @@ def _load_from_api() -> pd.DataFrame:
                 "application_type":   _derive_application_type(application_number),
                 "outcome":            _derive_outcome(letter_type),
                 "date_fetched":       datetime.utcnow().isoformat(),
+                "eventually_approved": None,
+                "approval_date":       None,
             })
 
-        status.update(label=f"Fetched {min(skip + limit, total)} / {total} records...")
+        status.update(label=f"Fetched {min(skip + limit, total)} / {total} CRL records...")
 
-    status.update(label=f"Loaded {len(records)} records from openFDA.", state="complete")
+    status.update(label=f"Cross-referencing approvals for {len(records)} records...", state="running")
+
+    # Build unique normalized application numbers -> list of record indices
+    app_index: dict[str, list[int]] = {}
+    for i, rec in enumerate(records):
+        normalized = (rec["application_number"] or "").replace(" ", "").strip()
+        if normalized:
+            app_index.setdefault(normalized, []).append(i)
+
+    crossref_cache: dict[str, tuple[str, str | None]] = {}
+    for n, (app_number, indices) in enumerate(app_index.items()):
+        eventually_approved, approval_date = _crossref_approval(app_number, api_key)
+        crossref_cache[app_number] = (eventually_approved, approval_date)
+        for i in indices:
+            records[i]["eventually_approved"] = eventually_approved
+            records[i]["approval_date"] = approval_date
+        time.sleep(0.3)
+        if n % 10 == 0:
+            status.update(label=f"Cross-referencing approvals... {n + 1} / {len(app_index)}")
+
+    yes_count = sum(1 for e, _ in crossref_cache.values() if e == "Yes")
+    status.update(
+        label=f"Done. {len(records)} records loaded — {yes_count} eventually approved.",
+        state="complete",
+    )
     return pd.DataFrame(records)
 
 
@@ -131,7 +187,7 @@ def load_data() -> pd.DataFrame:
         df = _load_from_api()
 
     df["letter_date_dt"] = pd.to_datetime(df["letter_date"], format="%m/%d/%Y", errors="coerce")
-    df["year"] = df["letter_date_dt"].dt.year
+    df["year"] = df["letter_date_dt"].dt.year.astype("Int64")
 
     return df
 
@@ -143,14 +199,14 @@ df_all = load_data()
 # ---------------------------------------------------------------------------
 if os.path.exists(LOGO_PATH):
     st.image(LOGO_PATH, width=220)
-st.title("FDA CRL Tracker")
+st.title("🏛️ FDA CRL Tracker")
 
 # ---------------------------------------------------------------------------
 # Sidebar filters
 # ---------------------------------------------------------------------------
 st.sidebar.header("Filters")
 
-# Date range
+st.sidebar.markdown("**Date Range**")
 min_date = df_all["letter_date_dt"].min().date()
 max_date = df_all["letter_date_dt"].max().date()
 date_from, date_to = st.sidebar.date_input(
@@ -158,17 +214,18 @@ date_from, date_to = st.sidebar.date_input(
     value=(min_date, max_date),
     min_value=min_date,
     max_value=max_date,
+    label_visibility="collapsed",
 )
 
-# Outcome
+st.sidebar.markdown("**Outcome**")
 outcome_options = ["All", "Approved", "Not Approved", "Tentative Approval", "Other"]
-selected_outcome = st.sidebar.selectbox("Outcome", outcome_options)
+selected_outcome = st.sidebar.selectbox("Outcome", outcome_options, label_visibility="collapsed")
 
-# Application type
+st.sidebar.markdown("**Application Type**")
 app_type_options = ["All", "NDA", "BLA", "Unknown"]
-selected_app_type = st.sidebar.selectbox("Application Type", app_type_options)
+selected_app_type = st.sidebar.selectbox("Application Type", app_type_options, label_visibility="collapsed")
 
-# Approval center — flatten pipe-separated values into unique list
+st.sidebar.markdown("**Approval Center**")
 all_centers = sorted(
     set(
         center.strip()
@@ -177,14 +234,14 @@ all_centers = sorted(
         if center.strip()
     )
 )
-selected_centers = st.sidebar.multiselect("Approval Center", all_centers)
+selected_centers = st.sidebar.multiselect("Approval Center", all_centers, label_visibility="collapsed")
 
-# Eventually approved
+st.sidebar.markdown("**Eventually Approved**")
 eventually_approved_options = ["All", "Yes", "No"]
-selected_eventually_approved = st.sidebar.selectbox("Eventually Approved", eventually_approved_options)
+selected_eventually_approved = st.sidebar.selectbox("Eventually Approved", eventually_approved_options, label_visibility="collapsed")
 
-# Company name text search
-company_search = st.sidebar.text_input("Search company name")
+st.sidebar.markdown("**Search**")
+company_search = st.sidebar.text_input("Search company name", placeholder="Company name...", label_visibility="collapsed")
 
 # ---------------------------------------------------------------------------
 # Apply filters
@@ -233,31 +290,51 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Charts
 # ---------------------------------------------------------------------------
+BLUES_TEALS = ["#1d6fa5", "#17a2b8", "#2ca0a0", "#4e9ac7", "#7bc4e2", "#3d8b8b", "#89c4c4", "#5b8db8"]
+
+def chart_title(text: str) -> None:
+    st.markdown(f"<p style='font-size:1.1rem; font-weight:700; margin-bottom:0.25rem;'>{text}</p>", unsafe_allow_html=True)
+
 chart_col1, chart_col2 = st.columns(2)
 chart_col3, chart_col4 = st.columns(2)
-chart_col5, chart_col6 = st.columns(2)
+chart_col5, _ = st.columns(2)
 
 with chart_col1:
-    st.subheader("Records by Year")
-    year_counts = df["year"].value_counts().sort_index().reset_index()
+    chart_title("Records by Year")
+    year_counts = (
+        df["year"].dropna()
+        .astype(int)
+        .value_counts()
+        .sort_index()
+        .reset_index()
+    )
     year_counts.columns = ["Year", "Count"]
     year_counts["Year"] = year_counts["Year"].astype(str)
-    st.bar_chart(year_counts.set_index("Year")["Count"])
+    fig = px.bar(year_counts, x="Year", y="Count", color_discrete_sequence=[BLUES_TEALS[0]])
+    fig.update_layout(margin=dict(t=10, b=10), xaxis_title=None, yaxis_title=None)
+    st.plotly_chart(fig, use_container_width=True)
 
 with chart_col2:
-    st.subheader("Records by Outcome")
+    chart_title("Records by Outcome")
     outcome_counts = df["outcome"].value_counts().reset_index()
     outcome_counts.columns = ["Outcome", "Count"]
-    st.bar_chart(outcome_counts.set_index("Outcome")["Count"])
+    fig = px.pie(outcome_counts, values="Count", names="Outcome", color_discrete_sequence=BLUES_TEALS)
+    fig.update_layout(margin=dict(t=10, b=10), legend=dict(orientation="h", y=-0.15))
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    st.plotly_chart(fig, use_container_width=True)
 
 with chart_col3:
-    st.subheader("Records by Application Type")
+    chart_title("Records by Application Type")
     app_type_counts = df["application_type"].value_counts().reset_index()
     app_type_counts.columns = ["Application Type", "Count"]
-    st.bar_chart(app_type_counts.set_index("Application Type")["Count"])
+    fig = px.pie(app_type_counts, values="Count", names="Application Type",
+                 hole=0.5, color_discrete_sequence=BLUES_TEALS)
+    fig.update_layout(margin=dict(t=10, b=10), legend=dict(orientation="h", y=-0.15))
+    fig.update_traces(textposition="inside", textinfo="percent+label")
+    st.plotly_chart(fig, use_container_width=True)
 
 with chart_col4:
-    st.subheader("Top 15 Approval Centers")
+    chart_title("Top 15 Approval Centers")
     center_counts = (
         df["approval_center"]
         .dropna()
@@ -268,20 +345,31 @@ with chart_col4:
         .reset_index()
     )
     center_counts.columns = ["Center", "Count"]
-    st.bar_chart(center_counts.set_index("Center")["Count"])
+    fig = px.bar(center_counts, x="Count", y="Center", orientation="h",
+                 color_discrete_sequence=[BLUES_TEALS[2]])
+    fig.update_layout(margin=dict(t=10, b=10), xaxis_title=None, yaxis_title=None,
+                      yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig, use_container_width=True)
 
 with chart_col5:
-    st.subheader("Eventually Approved by Year")
+    chart_title("Eventually Approved by Year")
     if "eventually_approved" in df.columns and df["eventually_approved"].notna().any():
         ea_by_year = (
-            df[df["eventually_approved"].isin(["Yes", "No"])]
-            .groupby(["year", "eventually_approved"])
+            df[df["eventually_approved"].isin(["Yes", "No"])].copy()
+        )
+        ea_by_year["year"] = ea_by_year["year"].dropna().astype(int)
+        ea_by_year = (
+            ea_by_year.groupby(["year", "eventually_approved"])
             .size()
             .reset_index(name="Count")
         )
-        ea_pivot = ea_by_year.pivot(index="year", columns="eventually_approved", values="Count").fillna(0)
-        ea_pivot.index = ea_pivot.index.astype(str)
-        st.bar_chart(ea_pivot)
+        ea_by_year["year"] = ea_by_year["year"].astype(str)
+        fig = px.bar(ea_by_year, x="year", y="Count", color="eventually_approved",
+                     barmode="group",
+                     color_discrete_map={"Yes": BLUES_TEALS[0], "No": BLUES_TEALS[1]},
+                     labels={"year": "", "eventually_approved": "Eventually Approved"})
+        fig.update_layout(margin=dict(t=10, b=10), xaxis_title=None, yaxis_title=None)
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.caption("No eventually_approved data yet. Run src/crossref.py to populate.")
 
@@ -306,6 +394,8 @@ _base_cols = [
 TABLE_COLS = [c for c in _base_cols if c in df.columns]
 
 df_display = df[TABLE_COLS].sort_values("letter_date", ascending=False).reset_index(drop=True)
+# Ensure letter_date displays as MM/DD/YYYY string
+df_display["letter_date"] = pd.to_datetime(df_display["letter_date"], errors="coerce").dt.strftime("%m/%d/%Y").fillna(df_display["letter_date"])
 
 # ---------------------------------------------------------------------------
 # CSV export
@@ -398,9 +488,9 @@ st.caption(
 st.markdown(
     """
     <hr style="border: none; border-top: 1px solid #e0e0e0; margin-top: 2rem;">
-    <div style="text-align: center; color: #999999; font-size: 0.8rem; padding-bottom: 1rem;">
+    <div style="text-align: center; color: #888888; font-size: 0.9rem; padding-bottom: 1rem;">
         <p style="margin: 0.2rem 0;">Created by Alimelad</p>
-        <p style="margin: 0.2rem 0;">Questions? Reach out to <a href="mailto:ali.melad@aei.org" style="color: #999999;">ali.melad@aei.org</a></p>
+        <p style="margin: 0.2rem 0;">Questions? Reach out to <a href="mailto:ali.melad@aei.org" style="color: #888888;">ali.melad@aei.org</a></p>
     </div>
     """,
     unsafe_allow_html=True,

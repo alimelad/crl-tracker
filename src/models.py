@@ -49,9 +49,11 @@ class CRLRecord(Base):
     approval_title = Column(String)
     approval_center = Column(String)
     full_text = Column(Text)
-    application_type = Column(String)  # BLA, NDA, or Unknown
-    outcome = Column(String)           # Approved, Tentative Approval, Not Approved, Rescinded, Other
+    application_type = Column(String)    # BLA, NDA, or Unknown
+    outcome = Column(String)             # Approved, Tentative Approval, Not Approved, Rescinded, Other
     date_fetched = Column(DateTime, default=datetime.utcnow)
+    eventually_approved = Column(String) # Yes or No — populated by crossref.py
+    approval_date = Column(String)       # YYYY-MM-DD — populated by crossref.py
 
     def __repr__(self):
         return f"<CRLRecord(file_name={self.file_name!r}, application_number={self.application_number!r}, outcome={self.outcome!r})>"
